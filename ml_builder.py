@@ -5,6 +5,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import time as tm
 import os
+from sklearn.preprocessing import MinMaxScaler
 
 from model.stconvs2s import STConvS2S_R, STConvS2S_C
 from model.baselines import *
@@ -37,7 +38,7 @@ class MLBuilder:
         validation_split = 0.2
         test_split = 0.2
         # Loading the dataset
-        ds = xr.open_mfdataset(self.dataset_file)
+        ds = xr.open_mfdataset(self.dataset_file).load()
         if (self.config.small_dataset):
             ds = ds[dict(sample=slice(0,500))]
 
@@ -47,6 +48,39 @@ class MLBuilder:
                                       validation_split=validation_split, is_validation=True)
         test_dataset  = NetCDFDataset(ds, test_split=test_split, 
                                       validation_split=validation_split, is_test=True)
+
+        # === Log1p transform for precipitation (Y) ===
+        for dataset_name, dataset in zip(["train", "val", "test"], [train_dataset, val_dataset, test_dataset]):
+            y_np = dataset.y.detach().cpu().numpy()
+            y_log = np.log1p(y_np)
+            dataset.y = torch.tensor(y_log, dtype=dataset.y.dtype, device=dataset.y.device)
+            if self.config.verbose:
+                print(f"Applied log1p to Y in {dataset_name} set. Before: min={y_np.min()}, max={y_np.max()} | After: min={y_log.min()}, max={y_log.max()}")
+
+        # === MinMaxScaler feature scaling for all channels in X ===
+        use_min_max = True
+        if use_min_max:
+            for channel_idx in range(train_dataset.X.shape[1]):
+                # Fit scaler on training data for this channel
+                train_data = train_dataset.X[:, channel_idx].detach().cpu().numpy()
+                original_shape = train_data.shape
+                reshaped = train_data.reshape(-1, 1)
+                scaler = MinMaxScaler().fit(reshaped)
+                scaled_train = scaler.transform(reshaped).reshape(original_shape)
+                train_dataset.X[:, channel_idx] = torch.tensor(
+                    scaled_train, dtype=train_dataset.X.dtype, device=train_dataset.X.device
+                )
+                # Apply scaler to val and test
+                for dataset_name, dataset in zip(["val", "test"], [val_dataset, test_dataset]):
+                    data = dataset.X[:, channel_idx].detach().cpu().numpy()
+                    reshaped = data.reshape(-1, 1)
+                    scaled = scaler.transform(reshaped).reshape(data.shape)
+                    dataset.X[:, channel_idx] = torch.tensor(
+                        scaled, dtype=dataset.X.dtype, device=dataset.X.device
+                    )
+                    if self.config.verbose:
+                        print(f"Scaled {dataset_name} data for channel index {channel_idx} using training scaler")
+
         if (self.config.verbose):
             print('[X_train] Shape:', train_dataset.X.shape)
             print('[y_train] Shape:', train_dataset.y.shape)
@@ -176,10 +210,10 @@ class MLBuilder:
     def __get_dataset_file(self):
         dataset_file, dataset_name = None, None
         if (self.config.chirps):
-            dataset_file = 'data/dataset-chirps-1981-2019-seq5-ystep' + self.step + '.nc'
+            dataset_file = 'data/output_20_06.nc'
             dataset_name = 'chirps'
         else:
-            dataset_file = 'data/dataset-ucar-1979-2015-seq5-ystep' + self.step + '.nc'
+            dataset_file = 'data/output_20_06.nc'
             dataset_name = 'cfsr'
         
         return dataset_name, dataset_file
