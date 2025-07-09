@@ -22,8 +22,13 @@ class NetCDFDataset(Dataset):
         # data format batch x channel x time x latitude x longitude
         self.X = torch.from_numpy(data.x.values).float().permute(0, 4, 1, 2, 3)
         self.X = self.X[:,:,:5,:,:]
-        self.y = torch.from_numpy(data.y.values).float().permute(0, 4, 1, 2, 3)
-        
+
+        # take only channel 0 from data.y.values:
+        only_channel_0 = data.y.values[:,:,:,:,:1]
+
+        # self.y = torch.from_numpy(data.y.values).float().permute(0, 4, 1, 2, 3)
+        self.y = torch.from_numpy(only_channel_0).float().permute(0, 4, 1, 2, 3)
+
         if self.is_2d_model:
             self.X = torch.squeeze(self.X)
             self.y = torch.squeeze(self.y)

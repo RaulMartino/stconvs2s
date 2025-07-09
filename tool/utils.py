@@ -164,6 +164,9 @@ class Util:
         cmap = 'YlGnBu' if self.base_filename.startswith('chirps') else 'viridis'
         tensor_numpy = tensor[0,:,index,:,:].squeeze().cpu().numpy()
         if step == 5 or ax_input:
+            # Select the first time/step slice if tensor_numpy has 3 dimensions
+            if tensor_numpy.ndim == 3:
+                tensor_numpy = tensor_numpy[0]
             ax[j].imshow(np.flipud(tensor_numpy), cmap=cmap)
             ax[j].get_xaxis().set_visible(False)
             ax[j].get_yaxis().set_visible(False)

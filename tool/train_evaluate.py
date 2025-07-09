@@ -3,6 +3,7 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
+import pandas as pd
 
 class Trainer:
     
@@ -25,12 +26,23 @@ class Trainer:
         for epoch in range(1,self.epochs+1):
             train_loss = self.__train(is_chirps)
             evaluator = Evaluator(self.model, self.loss_fn, self.optimizer, self.val_loader, self.device, self.util)
-            val_loss,_ = evaluator.eval(is_test=False, is_chirps=is_chirps)
+            val_loss,_ = evaluator.eval(is_test=False, is_chirps=is_chirps, epoch=epoch)
             if (self.verbose):
                 print(f'Epoch: {epoch}/{self.epochs} - loss: {train_loss:.4f} - val_loss: {val_loss:.4f}')
             train_losses.append(train_loss)
             val_losses.append(val_loss)
+            
+            # Check if this is a new best epoch
+            is_new_best = val_loss < self.early_stopping.best_loss
+            
             self.early_stopping(val_loss, self.model, self.optimizer, epoch, filename)
+            
+            # If it was a new best, create confusion matrix plot
+            if is_new_best and self.verbose:
+                print("=> Creating confusion matrix plot for new best epoch")
+                evaluator_plot = Evaluator(self.model, self.loss_fn, self.optimizer, self.val_loader, self.device, self.util)
+                evaluator_plot.eval(is_test=False, is_chirps=is_chirps, epoch=epoch, save_best_plot=True)
+            
             if (torch.cuda.is_available()):
                 torch.cuda.empty_cache()
             if self.early_stopping.isToStop:
@@ -44,8 +56,19 @@ class Trainer:
         self.model.train()
         epoch_loss = 0.0
         mask_land = self.util.get_mask_land().to(self.device)
+        
+        # Track batches with all targets = 0
+        zero_target_batches = 0
+        total_batches = 0
+        
         for batch_idx, (inputs, target) in enumerate(self.train_loader):
             inputs, target = inputs.to(self.device), target.to(self.device)
+            
+            # Check if all targets in this batch are 0
+            if torch.all(target == 0):
+                zero_target_batches += 1
+            total_batches += 1
+            
             # get prediction
             output = self.model(inputs)
             if is_chirps:
@@ -58,6 +81,10 @@ class Trainer:
             # performs updates using calculated gradients
             self.optimizer.step()
             epoch_loss += loss.item()
+
+        # Print percentage of batches with all targets = 0
+        zero_pct = (zero_target_batches / total_batches) * 100
+        print(f"Batches with all targets = 0: {zero_target_batches}/{total_batches} ({zero_pct:.1f}%)")
 
         return  epoch_loss/len(self.train_loader)
             
@@ -109,33 +136,152 @@ class Evaluator:
         self.step = int(step)
         self.device = device
        
-    def eval(self, is_test=True, is_chirps=False):
+    def eval(self, is_test=True, is_chirps=False, epoch=1, save_best_plot=False):
         self.model.eval()
         cumulative_rmse, cumulative_mae = 0.0, 0.0
         observation_rmse, observation_mae = [0]*self.step, [0]*self.step
         loader_size = len(self.data_loader)
         mask_land = self.util.get_mask_land().to(self.device)
+
+        if is_test:
+            weak_threshold = 5
+            moderate_threshold = 25
+            heavy_threshold = 50
+        else:
+            weak_threshold = np.log1p(5)      # [0,5)
+            moderate_threshold = np.log1p(25) # [5,25)
+            heavy_threshold = np.log1p(50)    # [25,50)
+
+        conf_matrix = {
+            "0-5": {"0-5": 0, "5-25": 0, "25-50": 0, "50-inf": 0},
+            "5-25": {"0-5": 0, "5-25": 0, "25-50": 0, "50-inf": 0},
+            "25-50": {"0-5": 0, "5-25": 0, "25-50": 0, "50-inf": 0},
+            "50-inf": {"0-5": 0, "5-25": 0, "25-50": 0, "50-inf": 0},
+        }
+
+        # level_0_5_true = 0
+        # level_5_25_true = 0
+        # level_25_50_true = 0
+        # level_50_inf_true = 0
+
         with torch.no_grad(): 
+            # print(f"TOTAL BATCHES: {loader_size}")
+            # print("self.data_loader.dataset.y.shape", self.data_loader.dataset.y.shape)
+            # torch.Size([100, 1, 5, 9, 11])
+
             for batch_i, (inputs, target) in enumerate(self.data_loader):
+                # print(inputs.shape) # torch.Size([3, 19, 5, 9, 11]) batch_size = 3
+                # print(target.shape) # torch.Size([3, 1, 5, 9, 11]) batch_size = 3
                 inputs, target = inputs.to(self.device), target.to(self.device)
+
                 output = self.model(inputs)
                 if is_chirps:
-                    output = mask_land * output    
-                rmse_loss = self.loss_fn(output, target)
-                mae_loss = F.l1_loss(output, target)
+                    output = mask_land * output
+                
+
+                if is_test:
+                    # Checagem de sanidade ANTES do expm1
+                    if torch.isnan(output).any() or torch.isinf(output).any():
+                        print("[WARN] Previsão do modelo contém NaN ou Inf antes do expm1!")
+                    if (output > 20).any():
+                        print("[WARN] Previsão do modelo contém valores > 20 antes do expm1!")
+                    output_eval = torch.expm1(output)
+                    target_eval = torch.expm1(target)
+                    # Checagem de sanidade DEPOIS do expm1
+                    if torch.isnan(output_eval).any() or torch.isinf(output_eval).any():
+                        print("[WARN] Previsão do modelo contém NaN ou Inf após expm1!")
+                    if (output_eval > 5000).any():
+                        print("[WARN] Previsão do modelo contém valores > 5000 mm após expm1!")
+                else:
+                    output_eval = output
+                    target_eval = target
+
+                target_squeeze = target_eval.squeeze(1)
+
+                mask_0_5 = target_squeeze < weak_threshold
+                mask_5_25 = (target_squeeze >= weak_threshold) & (target_squeeze < moderate_threshold)
+                mask_25_50 = (target_squeeze >= moderate_threshold) & (target_squeeze < heavy_threshold)
+                mask_50_inf = target_squeeze >= heavy_threshold
+
+                # level_0_5_true   += mask_0_5.sum().item()
+                # level_5_25_true  += mask_5_25.sum().item()
+                # level_25_50_true += mask_25_50.sum().item()
+                # level_50_inf_true+= mask_50_inf.sum().item()
+
+                rmse_loss = self.loss_fn(output_eval, target_eval)
+                mae_loss = F.l1_loss(output_eval, target_eval)
+
+                # output = torch.sigmoid(output)
+
                 cumulative_rmse += rmse_loss.item()
                 cumulative_mae += mae_loss.item()
                 
                 if is_test:
                     #metric per observation (lat x lon) at each time step (t) 
                     for i in range(self.step):
-                        output_observation = output[:,:,i,:,:]
-                        target_observation = target[:,:,i,:,:]
+                        output_observation = output_eval[:,:,i,:,:]
+                        target_observation = target_eval[:,:,i,:,:]
                         rmse_loss_obs = self.loss_fn(output_observation,target_observation)
                         mae_loss_obs = F.l1_loss(output_observation, target_observation)
                         observation_rmse[i] += rmse_loss_obs.item()
                         observation_mae[i] += mae_loss_obs.item()
-        
+                
+                # print(output.shape) # torch.Size([3, 1, 5, 9, 11])
+                # print(output[:, 0, :, :, :].shape) # torch.Size([3, 5, 9, 11])
+                y_pred = output_eval[:, 0, :, :, :]
+
+                conf_matrix["0-5"]["0-5"] += (
+                    (y_pred < weak_threshold) & mask_0_5
+                ).sum().item()
+                conf_matrix["0-5"]["5-25"] += (
+                    ((y_pred >= weak_threshold) & (y_pred < moderate_threshold)) & mask_0_5
+                ).sum().item()
+                conf_matrix["0-5"]["25-50"] += (
+                    ((y_pred >= moderate_threshold) & (y_pred < heavy_threshold)) & mask_0_5
+                ).sum().item()
+                conf_matrix["0-5"]["50-inf"]+= (
+                    (y_pred >= heavy_threshold) & mask_0_5
+                ).sum().item()
+
+                conf_matrix["5-25"]["0-5"] += (
+                    (y_pred < weak_threshold) & mask_5_25
+                ).sum().item()
+                conf_matrix["5-25"]["5-25"] += (
+                    ((y_pred >= weak_threshold) & (y_pred < moderate_threshold)) & mask_5_25
+                ).sum().item()
+                conf_matrix["5-25"]["25-50"] += (
+                    ((y_pred >= moderate_threshold) & (y_pred < heavy_threshold)) & mask_5_25
+                ).sum().item()
+                conf_matrix["5-25"]["50-inf"] += (
+                    (y_pred >= heavy_threshold) & mask_5_25
+                ).sum().item()
+
+                conf_matrix["25-50"]["0-5"] += (
+                    (y_pred < weak_threshold) & mask_25_50
+                ).sum().item()
+                conf_matrix["25-50"]["5-25"] += (
+                    ((y_pred >= weak_threshold) & (y_pred < moderate_threshold)) & mask_25_50
+                ).sum().item()
+                conf_matrix["25-50"]["25-50"] += (
+                    ((y_pred >= moderate_threshold) & (y_pred < heavy_threshold)) & mask_25_50
+                ).sum().item()
+                conf_matrix["25-50"]["50-inf"] += (
+                    (y_pred >= heavy_threshold) & mask_25_50
+                ).sum().item()
+
+                conf_matrix["50-inf"]["0-5"] += (
+                    (y_pred < weak_threshold) & mask_50_inf
+                ).sum().item()
+                conf_matrix["50-inf"]["5-25"] += (
+                    ((y_pred >= weak_threshold) & (y_pred < moderate_threshold)) & mask_50_inf
+                ).sum().item()
+                conf_matrix["50-inf"]["25-50"] += (
+                    ((y_pred >= moderate_threshold) & (y_pred < heavy_threshold)) & mask_50_inf
+                ).sum().item()
+                conf_matrix["50-inf"]["50-inf"] += (
+                    (y_pred >= heavy_threshold) & mask_50_inf
+                ).sum().item()
+                        
             if is_test:             
                 self.util.save_examples(inputs, target, output, self.step)
                 print('>>>>>>>>> Metric per observation (lat x lon) at each time step (t)')
@@ -144,6 +290,21 @@ class Evaluator:
                 print('MAE')
                 print(*np.divide(observation_mae, batch_i+1), sep = ",")
                 print('>>>>>>>>')  
+
+        confusion_df = pd.DataFrame(conf_matrix).T
+        print(f"\nConfusion matrix at epoch {epoch}")
+        print(confusion_df)
+        
+        # Plot confusion matrix histogram based on context
+        if is_test:
+            # Always save during final testing
+            save_path = f"confusion_matrix_test_epoch_{epoch}.png"
+            self.plot_confusion_matrix_histogram(conf_matrix, epoch, save_path)
+        elif save_best_plot:
+            # Save when this is the best epoch (called from EarlyStopping)
+            save_path = f"confusion_matrix_best_epoch_{epoch}.png"
+            self.plot_confusion_matrix_histogram(conf_matrix, epoch, save_path)
+        # For regular validation epochs, just print the matrix (no plot to avoid clutter)
                 
         return cumulative_rmse/loader_size,cumulative_mae/loader_size
         
@@ -164,3 +325,71 @@ class Evaluator:
             print(f'=> No checkpoint found at {filename}')
 
         return epoch, loss
+    
+    def plot_confusion_matrix_histogram(self, conf_matrix, epoch, save_path=None):
+        """
+        Create confusion matrix histogram visualization similar to the reference image
+        """
+        import matplotlib.pyplot as plt
+        
+        # Convert to DataFrame for easier handling
+        confusion_df = pd.DataFrame(conf_matrix).T
+        
+        # Calculate percentages for each true class
+        row_sums = confusion_df.sum(axis=1)
+        confusion_pct = confusion_df.div(row_sums, axis=0) * 100
+        
+        # Create figure with subplots
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        axes = axes.flatten()
+        
+        # Colors for each predicted class
+        colors = ['lightblue', 'green', 'orange', 'red']
+        class_labels = ['(0-5)', '(5-25)', '(25-50)', '(50-inf)']
+        class_names = ['Weak', 'Moderate', 'Heavy', 'Extreme']
+        
+        # Plot each true class
+        for i, (true_class, true_name) in enumerate(zip(['0-5', '5-25', '25-50', '50-inf'], class_names)):
+            ax = axes[i]
+            
+            # Get data for this true class
+            values = confusion_df.loc[true_class].values
+            percentages = confusion_pct.loc[true_class].values
+            
+            # Create bars
+            bars = ax.bar(range(len(values)), values, color=colors, alpha=0.8, edgecolor='black')
+            
+            # Add value labels on bars
+            for j, (bar, val, pct) in enumerate(zip(bars, values, percentages)):
+                height = bar.get_height()
+                if val > 0:  # Only label non-zero bars
+                    ax.text(bar.get_x() + bar.get_width()/2., height + max(values)*0.01,
+                           f'{int(val)} ({pct:.1f}%)', 
+                           ha='center', va='bottom', fontsize=10, fontweight='bold')
+            
+            # Customize subplot
+            ax.set_title(f'{true_name} Precipitation\n{class_labels[i]} mm/h', 
+                        fontsize=12, fontweight='bold')
+            ax.set_xticks(range(len(class_labels)))
+            ax.set_xticklabels(class_labels)
+            ax.set_xlabel('Predicted')
+            ax.set_ylabel('Count')
+            ax.grid(True, alpha=0.3)
+            
+            # Set y-axis limit with some padding
+            ax.set_ylim(0, max(values) * 1.15 if max(values) > 0 else 1)
+        
+        # Add overall title
+        fig.suptitle(f'Confusion Matrix - Epoch {epoch}', fontsize=14, fontweight='bold')
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        
+        # Save or show
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"Confusion matrix histogram saved to: {save_path}")
+        else:
+            plt.show()
+        
+        plt.close()
+        
+        return confusion_df, confusion_pct
