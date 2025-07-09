@@ -145,7 +145,13 @@ class MLBuilder:
         return {**train_info, **eval_info}
 
 
+
     def __execute_learning(self, model, criterion, optimizer, train_loader, val_loader, util):
+        # Salvar o modelo antes do treinamento
+        initial_model_path = util.get_checkpoint_filename().replace('.pth', '_initial.pth')
+        torch.save(model.state_dict(), initial_model_path)
+        print(f"Modelo inicial salvo em: {initial_model_path}")
+
         checkpoint_filename = util.get_checkpoint_filename()    
         trainer = Trainer(model, criterion, optimizer, train_loader, val_loader, self.config.epoch, 
                           self.device, util, self.config.verbose, self.config.patience, self.config.no_stop)
