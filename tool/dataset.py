@@ -4,6 +4,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+extreme_threshold = np.log1p(50)
+
 class NetCDFDataset(Dataset):
 
     def __init__(self, dataset, test_split=0, validation_split=0, is_validation=False, is_test=False, is_2d_model=False):
@@ -66,3 +68,15 @@ class Splitter():
                 return dataset[dict(sample=slice(0,split))]
             else:
                 return dataset[dict(sample=slice(split, None))]
+
+
+def compute_sample_weights(labels, threshold=extreme_threshold):
+    labels_np = labels.numpy()
+    binary_labels = (labels_np >= threshold).any(axis=(1,2,3,4)).astype(int)
+    print("Extreme vs non-extreme counts:", np.bincount(binary_labels))
+    # [52959   729] = 52959 + 729 = 53688 = total train samples
+    # assert sum(binary_labels) to be equals to total train samples
+    class_counts = np.bincount(binary_labels)
+    class_weights = 1.0 / class_counts
+    sample_weights = class_weights[binary_labels]
+    return sample_weights

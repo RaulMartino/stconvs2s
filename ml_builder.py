@@ -12,13 +12,13 @@ from model.baselines import *
 from model.ablation import *
  
 from tool.train_evaluate import Trainer, Evaluator
-from tool.dataset import NetCDFDataset
+from tool.dataset import NetCDFDataset, compute_sample_weights
 from tool.loss import RMSELoss, MAELoss
 from tool.utils import Util
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch import optim
 
 class MLBuilder:
@@ -48,6 +48,9 @@ class MLBuilder:
                                       validation_split=validation_split, is_validation=True)
         test_dataset  = NetCDFDataset(ds, test_split=test_split, 
                                       validation_split=validation_split, is_test=True)
+
+        train_sample_weights = compute_sample_weights(train_dataset.y)
+        train_sampler = WeightedRandomSampler(train_sample_weights, num_samples=len(train_sample_weights), replacement=True)
 
         # === Log1p transform for precipitation (Y) ===
         for dataset_name, dataset in zip(["train", "val", "test"], [train_dataset, val_dataset, test_dataset]):
@@ -94,7 +97,7 @@ class MLBuilder:
                   'num_workers': self.config.workers, 
                   'worker_init_fn': self.__init_seed}
 
-        train_loader = DataLoader(dataset=train_dataset, shuffle=True,**params)
+        train_loader = DataLoader(dataset=train_dataset, sampler=train_sampler,**params)
         val_loader = DataLoader(dataset=val_dataset, shuffle=False,**params)
         test_loader = DataLoader(dataset=test_dataset, shuffle=False, **params)
         
@@ -216,10 +219,10 @@ class MLBuilder:
     def __get_dataset_file(self):
         dataset_file, dataset_name = None, None
         if (self.config.chirps):
-            dataset_file = 'data/output_07_07.nc'
+            dataset_file = 'data/dataset-chirps-1981-2019-seq5-ystep5.nc'
             dataset_name = 'chirps'
         else:
-            dataset_file = 'data/output_07_07.nc'
+            dataset_file = 'data/dataset-chirps-1981-2019-seq5-ystep5.nc'
             dataset_name = 'cfsr'
         
         return dataset_name, dataset_file
