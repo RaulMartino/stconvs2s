@@ -14,10 +14,10 @@ def compute_weights(y_true):
     labels[y_np >= thr3] = 4
     # Extreme: 0.0040%, Heavy: 0.0173%, Moderate: 0.7135%, Weak: 99.2653%
     fixed_weights = {
-        1: 1.0,  
-        2: 10.0,
-        3: 50.0,
-        4: 100.0
+        1: 0.2,  
+        2: 30.0,
+        3: 2500.0,
+        4: 20000.0
     }
     sample_weights = np.empty_like(labels, dtype=float)
     for label, weight in fixed_weights.items():

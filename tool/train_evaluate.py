@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import pandas as pd
+from tqdm import tqdm
 
 class Trainer:
     
@@ -23,7 +24,7 @@ class Trainer:
     def fit(self, filename, is_chirps=False):
         train_losses, val_losses = [], []
 
-        for epoch in range(1,self.epochs+1):
+        for epoch in tqdm(range(1,self.epochs+1)):
             train_loss = self.__train(is_chirps)
             evaluator = Evaluator(self.model, self.loss_fn, self.optimizer, self.val_loader, self.device, self.util)
             val_loss,_ = evaluator.eval(is_test=False, is_chirps=is_chirps, epoch=epoch)
@@ -143,14 +144,9 @@ class Evaluator:
         loader_size = len(self.data_loader)
         mask_land = self.util.get_mask_land().to(self.device)
 
-        if is_test:
-            weak_threshold = 5
-            moderate_threshold = 25
-            heavy_threshold = 50
-        else:
-            weak_threshold = np.log1p(5)      # [0,5)
-            moderate_threshold = np.log1p(25) # [5,25)
-            heavy_threshold = np.log1p(50)    # [25,50)
+        weak_threshold = np.log1p(5)      # [0,5)
+        moderate_threshold = np.log1p(25) # [5,25)
+        heavy_threshold = np.log1p(50)    # [25,50)
 
         conf_matrix = {
             "0-5": {"0-5": 0, "5-25": 0, "25-50": 0, "50-inf": 0},
@@ -174,29 +170,7 @@ class Evaluator:
                 # print(target.shape) # torch.Size([3, 1, 5, 9, 11]) batch_size = 3
                 inputs, target = inputs.to(self.device), target.to(self.device)
 
-                output = self.model(inputs)
-                if is_chirps:
-                    output = mask_land * output
-                
-
-                if is_test:
-                    # Checagem de sanidade ANTES do expm1
-                    if torch.isnan(output).any() or torch.isinf(output).any():
-                        print("[WARN] Previsão do modelo contém NaN ou Inf antes do expm1!")
-                    if (output > 20).any():
-                        print("[WARN] Previsão do modelo contém valores > 20 antes do expm1!")
-                    output_eval = torch.expm1(output)
-                    target_eval = torch.expm1(target)
-                    # Checagem de sanidade DEPOIS do expm1
-                    if torch.isnan(output_eval).any() or torch.isinf(output_eval).any():
-                        print("[WARN] Previsão do modelo contém NaN ou Inf após expm1!")
-                    if (output_eval > 5000).any():
-                        print("[WARN] Previsão do modelo contém valores > 5000 mm após expm1!")
-                else:
-                    output_eval = output
-                    target_eval = target
-
-                target_squeeze = target_eval.squeeze(1)
+                target_squeeze = target.squeeze(1)
 
                 mask_0_5 = target_squeeze < weak_threshold
                 mask_5_25 = (target_squeeze >= weak_threshold) & (target_squeeze < moderate_threshold)
@@ -208,19 +182,20 @@ class Evaluator:
                 # level_25_50_true += mask_25_50.sum().item()
                 # level_50_inf_true+= mask_50_inf.sum().item()
 
-                rmse_loss = self.loss_fn(output_eval, target_eval)
-                mae_loss = F.l1_loss(output_eval, target_eval)
-
-                # output = torch.sigmoid(output)
-
+                
+                output = self.model(inputs) 
+                if is_chirps:
+                    output = mask_land * output
+                rmse_loss = self.loss_fn(output, target)
+                mae_loss = F.l1_loss(output, target)
                 cumulative_rmse += rmse_loss.item()
                 cumulative_mae += mae_loss.item()
                 
                 if is_test:
                     #metric per observation (lat x lon) at each time step (t) 
                     for i in range(self.step):
-                        output_observation = output_eval[:,:,i,:,:]
-                        target_observation = target_eval[:,:,i,:,:]
+                        output_observation = output[:,:,i,:,:]
+                        target_observation = target[:,:,i,:,:]
                         rmse_loss_obs = self.loss_fn(output_observation,target_observation)
                         mae_loss_obs = F.l1_loss(output_observation, target_observation)
                         observation_rmse[i] += rmse_loss_obs.item()
@@ -228,7 +203,7 @@ class Evaluator:
                 
                 # print(output.shape) # torch.Size([3, 1, 5, 9, 11])
                 # print(output[:, 0, :, :, :].shape) # torch.Size([3, 5, 9, 11])
-                y_pred = output_eval[:, 0, :, :, :]
+                y_pred = output[:, 0, :, :, :]
 
                 conf_matrix["0-5"]["0-5"] += (
                     (y_pred < weak_threshold) & mask_0_5
