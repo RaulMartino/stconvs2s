@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import pandas as pd
+import time
 from tqdm import tqdm
 
 class Trainer:
@@ -24,26 +25,27 @@ class Trainer:
     def fit(self, filename, is_chirps=False):
         train_losses, val_losses = [], []
 
-        for epoch in tqdm(range(1,self.epochs+1)):
+        for epoch in tqdm(range(1, self.epochs + 1)):
             train_loss = self.__train(is_chirps)
             evaluator = Evaluator(self.model, self.loss_fn, self.optimizer, self.val_loader, self.device, self.util)
-            val_loss,_ = evaluator.eval(is_test=False, is_chirps=is_chirps, epoch=epoch)
+            val_loss, _ = evaluator.eval(is_test=False, is_chirps=is_chirps, epoch=epoch)
             if (self.verbose):
                 print(f'Epoch: {epoch}/{self.epochs} - loss: {train_loss:.4f} - val_loss: {val_loss:.4f}')
             train_losses.append(train_loss)
             val_losses.append(val_loss)
-            
+
             # Check if this is a new best epoch
             is_new_best = val_loss < self.early_stopping.best_loss
-            
+
             self.early_stopping(val_loss, self.model, self.optimizer, epoch, filename)
-            
+
             # If it was a new best, create confusion matrix plot
             if is_new_best and self.verbose:
+                print("[INFO] New best model at epoch", epoch)
                 print("=> Creating confusion matrix plot for new best epoch")
                 evaluator_plot = Evaluator(self.model, self.loss_fn, self.optimizer, self.val_loader, self.device, self.util)
                 evaluator_plot.eval(is_test=False, is_chirps=is_chirps, epoch=epoch, save_best_plot=True)
-            
+
             if (torch.cuda.is_available()):
                 torch.cuda.empty_cache()
             if self.early_stopping.isToStop:
@@ -51,30 +53,22 @@ class Trainer:
                     print("=> Stopped")
                 break
 
+        print("[INFO] Training finished. Returning loss history.")
         return train_losses, val_losses
 
     def __train(self, is_chirps=False):
         self.model.train()
         epoch_loss = 0.0
         mask_land = self.util.get_mask_land().to(self.device)
-        
-        # Track batches with all targets = 0
-        zero_target_batches = 0
-        total_batches = 0
-        
         for batch_idx, (inputs, target) in enumerate(self.train_loader):
             inputs, target = inputs.to(self.device), target.to(self.device)
-            
-            # Check if all targets in this batch are 0
-            if torch.all(target == 0):
-                zero_target_batches += 1
-            total_batches += 1
-            
             # get prediction
             output = self.model(inputs)
             if is_chirps:
                 output = mask_land * output
             loss = self.loss_fn(output, target)
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"[WARN] Loss is NaN or Inf at batch {batch_idx}!")
             # clear previous gradients 
             self.optimizer.zero_grad()
             # compute gradients
@@ -82,12 +76,8 @@ class Trainer:
             # performs updates using calculated gradients
             self.optimizer.step()
             epoch_loss += loss.item()
-
-        # Print percentage of batches with all targets = 0
-        zero_pct = (zero_target_batches / total_batches) * 100
-        print(f"Batches with all targets = 0: {zero_target_batches}/{total_batches} ({zero_pct:.1f}%)")
-
-        return  epoch_loss/len(self.train_loader)
+        print(f"[INFO] Training epoch complete. Avg loss: {epoch_loss/len(self.train_loader):.4f}")
+        return epoch_loss / len(self.train_loader)
             
             
 class EarlyStopping:
@@ -123,7 +113,7 @@ class EarlyStopping:
                  'loss': loss}
         torch.save(state, filename)
         if (self.verbose):
-            print ('=> Saving a new best') 
+            print ('=> Saving a new best')
         
     
 class Evaluator:
@@ -155,44 +145,26 @@ class Evaluator:
             "50-inf": {"0-5": 0, "5-25": 0, "25-50": 0, "50-inf": 0},
         }
 
-        # level_0_5_true = 0
-        # level_5_25_true = 0
-        # level_25_50_true = 0
-        # level_50_inf_true = 0
-
-        with torch.no_grad(): 
-            # print(f"TOTAL BATCHES: {loader_size}")
-            # print("self.data_loader.dataset.y.shape", self.data_loader.dataset.y.shape)
-            # torch.Size([100, 1, 5, 9, 11])
-
+        with torch.no_grad():
             for batch_i, (inputs, target) in enumerate(self.data_loader):
-                # print(inputs.shape) # torch.Size([3, 19, 5, 9, 11]) batch_size = 3
-                # print(target.shape) # torch.Size([3, 1, 5, 9, 11]) batch_size = 3
                 inputs, target = inputs.to(self.device), target.to(self.device)
-
+                
                 target_squeeze = target.squeeze(1)
 
                 mask_0_5 = target_squeeze < weak_threshold
                 mask_5_25 = (target_squeeze >= weak_threshold) & (target_squeeze < moderate_threshold)
                 mask_25_50 = (target_squeeze >= moderate_threshold) & (target_squeeze < heavy_threshold)
                 mask_50_inf = target_squeeze >= heavy_threshold
-
-                # level_0_5_true   += mask_0_5.sum().item()
-                # level_5_25_true  += mask_5_25.sum().item()
-                # level_25_50_true += mask_25_50.sum().item()
-                # level_50_inf_true+= mask_50_inf.sum().item()
-
                 
-                output = self.model(inputs) 
+                output = self.model(inputs)
                 if is_chirps:
                     output = mask_land * output
                 rmse_loss = self.loss_fn(output, target)
                 mae_loss = F.l1_loss(output, target)
                 cumulative_rmse += rmse_loss.item()
                 cumulative_mae += mae_loss.item()
-                
+
                 if is_test:
-                    #metric per observation (lat x lon) at each time step (t) 
                     for i in range(self.step):
                         output_observation = output[:,:,i,:,:]
                         target_observation = target[:,:,i,:,:]
@@ -200,9 +172,7 @@ class Evaluator:
                         mae_loss_obs = F.l1_loss(output_observation, target_observation)
                         observation_rmse[i] += rmse_loss_obs.item()
                         observation_mae[i] += mae_loss_obs.item()
-                
-                # print(output.shape) # torch.Size([3, 1, 5, 9, 11])
-                # print(output[:, 0, :, :, :].shape) # torch.Size([3, 5, 9, 11])
+
                 y_pred = output[:, 0, :, :, :]
 
                 conf_matrix["0-5"]["0-5"] += (
@@ -256,32 +226,31 @@ class Evaluator:
                 conf_matrix["50-inf"]["50-inf"] += (
                     (y_pred >= heavy_threshold) & mask_50_inf
                 ).sum().item()
-                        
-            if is_test:             
+
+            if is_test:
                 self.util.save_examples(inputs, target, output, self.step)
                 print('>>>>>>>>> Metric per observation (lat x lon) at each time step (t)')
                 print('RMSE')
-                print(*np.divide(observation_rmse, batch_i+1), sep = ",")
+                print(*np.divide(observation_rmse, batch_i+1), sep=",")
                 print('MAE')
-                print(*np.divide(observation_mae, batch_i+1), sep = ",")
-                print('>>>>>>>>')  
+                print(*np.divide(observation_mae, batch_i+1), sep=",")
+                print('>>>>>>>>')
 
         confusion_df = pd.DataFrame(conf_matrix).T
-        print(f"\nConfusion matrix at epoch {epoch}")
+        print(f"\n[INFO] Confusion matrix at epoch {epoch}")
         print(confusion_df)
-        
+
         # Plot confusion matrix histogram based on context
         if is_test:
-            # Always save during final testing
             save_path = f"confusion_matrix_test_epoch_{epoch}.png"
             self.plot_confusion_matrix_histogram(conf_matrix, epoch, save_path)
         elif save_best_plot:
-            # Save when this is the best epoch (called from EarlyStopping)
             save_path = f"confusion_matrix_best_epoch_{epoch}.png"
             self.plot_confusion_matrix_histogram(conf_matrix, epoch, save_path)
+        
         # For regular validation epochs, just print the matrix (no plot to avoid clutter)
-                
-        return cumulative_rmse/loader_size,cumulative_mae/loader_size
+        print(f"[INFO] Evaluation complete. RMSE: {cumulative_rmse/loader_size:.4f}, MAE: {cumulative_mae/loader_size:.4f}")
+        return cumulative_rmse / loader_size, cumulative_mae / loader_size
         
         
     def load_checkpoint(self, filename, dataset_type=None, model=None):

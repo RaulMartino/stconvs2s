@@ -21,21 +21,21 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch import optim
 
-class MLBuilder:
+def print_precipitation_bin_counts(y_tensor, dataset_name="dataset"):
+    """
+    Print the counts of each precipitation bin in the target tensor (after log1p transform).
+    """
+    y_np = y_tensor.detach().cpu().numpy().flatten()
+    bins = [0, np.log1p(5), np.log1p(25), np.log1p(50), np.inf]
+    bin_labels = ['0-5mm', '5-25mm', '25-50mm', '50+mm']
+    bin_indices = np.digitize(y_np, bins) - 1
+    bin_indices = np.clip(bin_indices, 0, len(bin_labels) - 1)
+    counts = np.bincount(bin_indices, minlength=len(bin_labels))
+    print(f"\nPrecipitation bin counts in {dataset_name} (log1p scale):")
+    for i, label in enumerate(bin_labels):
+        print(f"  {label}: {counts[i]}")
 
-    def print_precipitation_bin_counts(self, y_tensor, dataset_name="dataset"):
-        """
-        Print the counts of each precipitation bin in the target tensor (after log1p transform).
-        """
-        y_np = y_tensor.detach().cpu().numpy().flatten()
-        bins = [0, np.log1p(5), np.log1p(25), np.log1p(50), np.inf]
-        bin_labels = ['0-5mm', '5-25mm', '25-50mm', '50+mm']
-        bin_indices = np.digitize(y_np, bins) - 1
-        bin_indices = np.clip(bin_indices, 0, len(bin_labels) - 1)
-        counts = np.bincount(bin_indices, minlength=len(bin_labels))
-        print(f"\nPrecipitation bin counts in {dataset_name} (log1p scale):")
-        for i, label in enumerate(bin_labels):
-            print(f"  {label}: {counts[i]}")
+class MLBuilder:
 
     def __init__(self, config, device):
         
@@ -54,10 +54,11 @@ class MLBuilder:
         # Loading the dataset
         ds = xr.open_mfdataset(self.dataset_file).load()
         if (self.config.small_dataset):
-            ds = ds.isel(sample=slice(0,2000))
+            ds = ds[dict(sample=slice(0,2000))]
 
         # === Log1p transform for precipitation (Y) ===
         precipitation_y = ds.y.isel(channel=0)
+        print(f"Max precipitation_y before log1p: {precipitation_y.max().values}")
         ds["y"].loc[{"channel": ds.y.channel.values[0]}] = np.log1p(precipitation_y)
         print(f"Max precipitation_y after log1p: {ds.y.isel(channel=0).max().values}")
 
@@ -66,22 +67,32 @@ class MLBuilder:
         val_dataset   = NetCDFDataset(ds, test_split=test_split, validation_split=validation_split, is_validation=True)
         test_dataset  = NetCDFDataset(ds, test_split=test_split, validation_split=validation_split, is_test=True)
 
+        # Scale the data for each channel using MinMaxScaler
         for channel_idx in range(train_dataset.X.shape[1]):
             train_data = train_dataset.X[:, channel_idx].detach().cpu().numpy()
+            print(f"Channel {channel_idx} - train min/max before scaling:", train_data.min(), train_data.max())
             original_shape = train_data.shape
             reshaped = train_data.reshape(-1, 1)
+            
             scaler = MinMaxScaler().fit(reshaped)
             scaled_train = scaler.transform(reshaped).reshape(original_shape)
+            print(f"Channel {channel_idx} - train min/max after scaling:", scaled_train.min(), scaled_train.max())
+            
             train_dataset.X[:, channel_idx] = torch.tensor(
-                scaled_train, dtype=train_dataset.X.dtype, device=train_dataset.X.device
+                scaled_train, 
+                dtype=train_dataset.X.dtype, 
+                device=train_dataset.X.device
             )
 
             for dataset_name, dataset in zip(["val", "test"], [val_dataset, test_dataset]):
                 data = dataset.X[:, channel_idx].detach().cpu().numpy()
                 reshaped = data.reshape(-1, 1)
                 scaled = scaler.transform(reshaped).reshape(data.shape)
+
                 dataset.X[:, channel_idx] = torch.tensor(
-                    scaled, dtype=dataset.X.dtype, device=dataset.X.device
+                    scaled, 
+                    dtype=dataset.X.dtype, 
+                    device=dataset.X.device
                 )
                 print(f"Scaled {dataset_name} data for channel index {channel_idx} using training scaler")
 
