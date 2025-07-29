@@ -19,21 +19,7 @@ from tool.utils import Util
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, WeightedRandomSampler
-from torch import optim
 
-def print_precipitation_bin_counts(y_tensor, dataset_name="dataset"):
-    """
-    Print the counts of each precipitation bin in the target tensor (after log1p transform).
-    """
-    y_np = y_tensor.detach().cpu().numpy().flatten()
-    bins = [0, np.log1p(5), np.log1p(25), np.log1p(50), np.inf]
-    bin_labels = ['0-5mm', '5-25mm', '25-50mm', '50+mm']
-    bin_indices = np.digitize(y_np, bins) - 1
-    bin_indices = np.clip(bin_indices, 0, len(bin_labels) - 1)
-    counts = np.bincount(bin_indices, minlength=len(bin_labels))
-    print(f"\nPrecipitation bin counts in {dataset_name} (log1p scale):")
-    for i, label in enumerate(bin_labels):
-        print(f"  {label}: {counts[i]}")
 
 class MLBuilder:
 
@@ -107,9 +93,9 @@ class MLBuilder:
             print('[X_test] Shape:', test_dataset.X.shape)
             print('[y_test] Shape:', test_dataset.y.shape)
             print(f'Train on {len(train_dataset)} samples, validate on {len(val_dataset)} samples')
-            self.print_precipitation_bin_counts(train_dataset.y, "train")
-            self.print_precipitation_bin_counts(val_dataset.y, "validation")
-            self.print_precipitation_bin_counts(test_dataset.y, "test")
+            self._print_precipitation_bin_counts(train_dataset.y, "train")
+            self._print_precipitation_bin_counts(val_dataset.y, "validation")
+            self._print_precipitation_bin_counts(test_dataset.y, "test")
                                 
         params = {'batch_size': self.config.batch, 
                   'num_workers': self.config.workers, 
@@ -237,10 +223,10 @@ class MLBuilder:
     def __get_dataset_file(self):
         dataset_file, dataset_name = None, None
         if (self.config.chirps):
-            dataset_file = 'data/output_07_07_part2.nc'
+            dataset_file = 'data/output_17_07.nc'
             dataset_name = 'chirps'
         else:
-            dataset_file = 'data/output_07_07_part2.nc'
+            dataset_file = 'data/output_17_07.nc'
             dataset_name = 'cfsr'
         
         return dataset_name, dataset_file
@@ -257,83 +243,13 @@ class MLBuilder:
 
         return dropout_rate
     
-    def _create_stratified_small_dataset(self, ds, target_samples=500):
-        """
-        Create a stratified small dataset that maintains precipitation level proportions.
-        
-        Args:
-            ds: Original xarray dataset
-            target_samples: Number of samples to include in small dataset
-            
-        Returns:
-            Stratified xarray dataset subset
-        """
-        import numpy as np
-        
-        # Get precipitation data (Y) - assume last channel is precipitation
-        y_data = ds.y.values[:, :, :, :, -1]  # Last channel
-        
-        # Calculate mean precipitation per sample
-        sample_means = np.mean(y_data, axis=(1, 2, 3))
-        
-        # Define precipitation bins (in log1p scale since data will be transformed)
+    def _print_precipitation_bin_counts(self, y_tensor, dataset_name="dataset"):
+        y_np = y_tensor.detach().cpu().numpy().flatten()
         bins = [0, np.log1p(5), np.log1p(25), np.log1p(50), np.inf]
         bin_labels = ['0-5mm', '5-25mm', '25-50mm', '50+mm']
-        
-        # Assign each sample to a precipitation level
-        sample_levels = np.digitize(sample_means, bins) - 1
-        sample_levels = np.clip(sample_levels, 0, len(bin_labels) - 1)
-        
-        # Calculate original proportions
-        original_counts = np.bincount(sample_levels, minlength=len(bin_labels))
-        original_props = original_counts / len(sample_levels)
-        
-        # Calculate target counts for small dataset
-        target_counts = (original_props * target_samples).astype(int)
-        
-        # Ensure at least 1 sample from each extreme class (if available)
-        min_extreme_samples = 1
-        for level in [2, 3]:  # 25-50mm and 50+mm classes
-            if original_counts[level] > 0 and target_counts[level] == 0:
-                target_counts[level] = min_extreme_samples
-                print(f"  Forced at least {min_extreme_samples} sample(s) for class {bin_labels[level]}")
-        
-        # Adjust to ensure we get exactly target_samples
-        diff = target_samples - target_counts.sum()
-        if diff > 0:
-            # Add to most frequent class
-            target_counts[np.argmax(original_counts)] += diff
-        elif diff < 0:
-            # Remove from most frequent class (but not below forced minimums)
-            most_frequent = np.argmax(original_counts)
-            reduction = min(-diff, target_counts[most_frequent] - 1)  # Keep at least 1
-            target_counts[most_frequent] -= reduction
-        
-        # Sample from each level
-        selected_indices = []
-        for level in range(len(bin_labels)):
-            level_indices = np.where(sample_levels == level)[0]
-            n_to_sample = min(target_counts[level], len(level_indices))
-            
-            if n_to_sample > 0:
-                sampled_indices = np.random.choice(level_indices, n_to_sample, replace=False)
-                selected_indices.extend(sampled_indices)
-        
-        selected_indices = np.array(selected_indices)
-        
-        # Print stratification results
-        print(f"\n=== Stratified Small Dataset ({target_samples} samples) ===")
-        print("Original dataset proportions:")
+        bin_indices = np.digitize(y_np, bins) - 1
+        bin_indices = np.clip(bin_indices, 0, len(bin_labels) - 1)
+        counts = np.bincount(bin_indices, minlength=len(bin_labels))
+        print(f"\nPrecipitation bin counts in {dataset_name} (log1p scale):")
         for i, label in enumerate(bin_labels):
-            print(f"  {label}: {original_counts[i]:,} ({original_props[i]:.1%})")
-        
-        print("\nSmall dataset proportions:")
-        small_counts = np.bincount([sample_levels[i] for i in selected_indices], minlength=len(bin_labels))
-        small_props = small_counts / len(selected_indices)
-        for i, label in enumerate(bin_labels):
-            print(f"  {label}: {small_counts[i]:,} ({small_props[i]:.1%})")
-        
-        # Create subset dataset
-        stratified_ds = ds.isel(sample=selected_indices)
-        
-        return stratified_ds
+            print(f"  {label}: {counts[i]}")

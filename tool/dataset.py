@@ -69,12 +69,17 @@ class Splitter():
         return self.__split(data, self.validation_rate, first_part=True)
     
     def __split(self, dataset, split_rate, first_part):
-        if (split_rate):
-            split = int(dataset.sample.size * (1. - split_rate))
-            if (first_part):
-                return dataset[dict(sample=slice(0,split))]
+        if split_rate:
+            num_samples = dataset.sample.size
+            indices = np.arange(num_samples)
+            np.random.seed(42)  # or use a configurable/random seed
+            np.random.shuffle(indices)
+            split = int(num_samples * (1. - split_rate))
+            if first_part:
+                selected = indices[:split]
             else:
-                return dataset[dict(sample=slice(split, None))]
+                selected = indices[split:]
+            return dataset.isel(sample=selected)
             
 
 def compute_sample_weights(labels, threshold=extreme_threshold):
